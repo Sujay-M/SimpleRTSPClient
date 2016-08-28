@@ -1,154 +1,89 @@
 package com.samsung.sujay.streaming;
 
-import com.samsung.sujay.streaming.RTPReceiver;
-import com.samsung.sujay.streaming.VideoQuality;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.PrintWriter;
-import java.net.InetAddress;
-import java.net.Socket;
-import java.net.UnknownHostException;
+import java.io.OutputStream;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Created by sujay on 20/8/16.
+ * Created by sujay.m on 8/28/2016.
  */
 public class RTSPClient
 {
-    private static final boolean DEBUG = true;
-    private String         URLFormat;
-    private String         rtspURL;
-    private String         serverIp;
-    private int            serverPort;
-    private VideoQuality   videoQuality;
-    private Socket         RTSPSocket;
-    private RTPReceiver    rtpreceiver;
-    private PrintWriter    writeToServer;
+
+    interface MessageReceived
+    {
+        void rtspData(String type, byte[] data);
+        void rtpDGram(DatagramPacket packet);
+        void rtpStream(byte[] data);
+    }
+
+    private String rtspURL;
+    private String serverIp;
+    private int serverPort;
+    private Socket RTSPSocket;
+    private RTPReceiver rtpreceiver;
+    private OutputStream outputStream;
     private BufferedReader readFromServer;
-    private int            CSeq;
-    private boolean        isStreaming;
-    private boolean        isConfigured;
-    private String         sessionId;
-    int[]                  clientPorts;
-    private ThreadPool     senderThreads;
+    private int CSeq;
+    private boolean isConfigured;
+    private String sessionId;
+    private int[] clientPorts;
+    private MessageReceived callback;
+    private String controlString;
 
+    public RTSPClient(MessageReceived callback, String url, int videoPort, int audioPort) throws IOException, CustomException {
 
-    public RTSPClient(String URLFormat, String args[])
-    {
-        Log("LOG", "Constructor");
-        this.URLFormat     = URLFormat;
-        videoQuality   = parseAgruments(args);
-        String address     = parseAddress(URLFormat);
+        this.callback = callback;
+        this.rtspURL = url;
+        String address = parseAddress(url);
         if (address == null)
-            return; // throw exception
+            throw new CustomException("Cannot Parse Address");
         String addrParts[] = address.split(":");
-        this.serverIp      = addrParts[0];
-        this.serverPort    = Integer.parseInt(addrParts[1]);
-        Log("IP", serverIp);
-        Log("PORT", serverPort+"");
+        this.serverIp = addrParts[0];
+        this.serverPort = Integer.parseInt(addrParts[1]);
+        this.CSeq = 1;
+        this.isConfigured = false;
+        clientPorts = new int[]{videoPort, audioPort};
+        controlString = null;
         connect();
-        this.CSeq          = 1;
-        this.isConfigured  = false;
-        this.isStreaming   = false;
-        clientPorts        = new int[]{60784, 60785};
-        senderThreads      = ThreadPool.getINSTANCE();
-        rtpreceiver        = new RTPReceiver();
+        rtpreceiver = new RTPReceiver(videoPort);
+        rtpreceiver.startReceiving();
     }
 
-    private void connect() {
-        Log("LOG", "trying to connect");
-        try
-        {
-            InetAddress serverAddr = InetAddress.getByName(serverIp);
-            Log("TCP", "CONNECTING");
-            RTSPSocket     = new Socket(serverAddr, serverPort);
-            Log("TCP", "CONNECTED");
-            RTSPSocket.setReuseAddress(true);
-            writeToServer  = new PrintWriter(RTSPSocket.getOutputStream(),true);
-            readFromServer = new BufferedReader(new InputStreamReader(RTSPSocket.getInputStream()));
-            RTSPSocket.setTcpNoDelay(true);
-        }
-        catch (UnknownHostException e)
-        {
-            Log("ERROR", "Host Unreachable");
-        }
-        catch (IOException e)
-        {
-            Log("ERROR", "Cant Connect");
-        }
+    private void connect() throws IOException {
+        InetAddress serverAddr = InetAddress.getByName(serverIp);
+        RTSPSocket = new Socket(serverAddr, serverPort);
+        RTSPSocket.setReuseAddress(true);
+        outputStream = RTSPSocket.getOutputStream();
+        readFromServer = new BufferedReader(new InputStreamReader(RTSPSocket.getInputStream(), "UTF8"));
     }
 
-    private void Log(String TYPE, String MSG)
-    {
-        if (DEBUG)
-        {
-            System.out.println(TYPE);
-            System.out.println(MSG);
-        }
-    }
-
-    private String parseAddress(String urlFormat)
-    {
+    private String parseAddress(String url) {
         Pattern rtspUrl = Pattern.compile("^rtsp://(.*):(\\d*).*$");
-        Matcher matcher = rtspUrl.matcher(urlFormat);
+        Matcher matcher = rtspUrl.matcher(url);
         if (matcher.find())
             return matcher.group(1) +":"+matcher.group(2);
         return null;
-    }
-
-    private VideoQuality parseAgruments(String[] args)
-    {
-        VideoQuality videoQuality = new VideoQuality(320,240,20,200);
-        if (args != null)
-        for (String arg:args)
-        {
-            switch (arg.substring(0,2))
-            {
-                case "-r":
-                    String res[] = arg.substring(2).split("x");
-                    videoQuality.resolutionW = Integer.parseInt(res[0]);
-                    videoQuality.resolutionH = Integer.parseInt(res[1]);
-                    break;
-                case "-f":
-                    videoQuality.fps = Integer.parseInt(arg.substring(2));
-                    break;
-                case "-b":
-                    videoQuality.bitrate = Integer.parseInt(arg.substring(2));
-                    break;
-            }
-        }
-        rtspURL = URLFormat
-                .replace("RESW", Integer.toString(videoQuality.resolutionW))
-                .replace("RESH", Integer.toString(videoQuality.resolutionH))
-                .replace("FPS" , Integer.toString(videoQuality.fps))
-                .replace("BRATE",Integer.toString(videoQuality.bitrate));
-        Log("URL", rtspURL);
-        return videoQuality;
-    }
-
-    private String getOptionsMsg()
-    {
-        return ("OPTIONS "+rtspURL+" RTSP/1.0\r\n"
-                +"CSeq: "+CSeq+"\r\n"
-                +"User-Agent: python\r\n");
     }
 
     private String getDescribeMsg()
     {
         return ("DESCRIBE "+rtspURL+" RTSP/1.0\r\n"
                 +"CSeq: "+CSeq+"\r\n"
-                +"User-Agent: python\r\n"
+                +"User-Agent: java\r\n"
                 +"Accept: application/sdp\r\n\r\n");
     }
 
-    private String getSetupMsg()
+    private String getSetupMsg(String controlString)
     {
-        return ("SETUP "+rtspURL+"/trackID=1 RTSP/1.0\r\n"
+        return ("SETUP "+rtspURL+"/"+ controlString +" RTSP/1.0\r\n"
                 +"CSeq: "+CSeq+"\r\n"
-                +"User-Agent: python\r\n"
+                +"User-Agent: java\r\n"
                 +"Transport: RTP/AVP;unicast;client_port="+clientPorts[0]+"-"+clientPorts[1]+"\r\n\r\n");
     }
 
@@ -156,69 +91,79 @@ public class RTSPClient
     {
         return ("PLAY "+rtspURL+" RTSP/1.0\r\n"
                 +"CSeq: "+CSeq+"\r\n"
-                +"User-Agent: python\r\n"
+                +"User-Agent: java\r\n"
                 +"Session: "+sessionId+"\r\n"
                 +"Range: npt=0.000-\r\n\r\n");
-    }
-
-    private String getPauseMsg()
-    {
-        return ("PAUSE "+rtspURL+" RTSP/1.0\r\n"
-                +"CSeq: "+CSeq+"\r\n"
-                +"User-Agent: python\r\n"
-                +"Session: "+sessionId+"\r\n");
     }
 
     private String getTeardownMsg()
     {
         return ("TEARDOWN "+rtspURL+" RTSP/1.0\r\n"
                 +"CSeq: "+CSeq+"\r\n"
-                +"User-Agent: python\r\n"
-                +"Session: "+sessionId+"\r\n");
+                +"User-Agent: java\r\n"
+                +"Session: "+sessionId+"\r\n\r\n");
     }
 
     private void sendRTSPCommand(String cmd)
     {
+// DLog.Log("SENDING", cmd);
         CSeq++;
-        writeToServer.println(cmd);
+        try {
+            outputStream.write(cmd.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
-    private String receiveRTSPReply()
+    private String receiveRTSPReply(String type)
     {
         try {
-            StringBuffer buf = new StringBuffer();
+            StringBuilder buf = new StringBuilder();
             String temp;
-            do
+            Pattern pattern = Pattern.compile("Content-Length: (\\d+)");
+            int contentLength = 0;
+            while ((temp = readFromServer.readLine())!=null)
             {
-                temp = readFromServer.readLine();
-                buf.append(temp + "\r\n");
-                System.out.println(temp);
-                Thread.sleep(100);
-            } while (RTSPSocket.getInputStream().available() != 0);
+                if (temp.isEmpty())
+                    break;
+                buf.append(temp).append("\r\n");
+                Matcher match = pattern.matcher(temp);
+                if (match.find())
+                    contentLength = Integer.parseInt(match.group(1));
+            }
+// DLog.Log("RECEIVED", buf.toString());
+            if (contentLength != 0)
+            {
+                char content[] = new char[contentLength+1];
+                readFromServer.read(content, 0, contentLength+1);
+// DLog.Log("CONTENT", new String(content));
+                if (type.equalsIgnoreCase("DESCRIBE"))
+                {
+                    System.out.println(new String(content));
+                    controlString = getControlString(new String (content));
+                }
+            }
+
+            callback.rtspData(type, null);
 
             return buf.toString();
         } catch (IOException e) {
-            e.printStackTrace();
-        } catch (InterruptedException e) {
             e.printStackTrace();
         }
         return null;
     }
 
-    public void sendOptions()
+    private String getControlString(String sdp)
     {
-        String optionsMsg = getOptionsMsg();
-        sendRTSPCommand(optionsMsg);
-        String reply = receiveRTSPReply();
-        Log("OPTIONS", reply);
+        return null;
     }
 
     public void sendDescribe()
     {
         String describeMsg = getDescribeMsg();
         sendRTSPCommand(describeMsg);
-        String reply = receiveRTSPReply();
-        Log("DESCRIBE", reply);
+        String reply = receiveRTSPReply("DESCRIBE");
+        DLog.Log("DESCRIBE", reply);
     }
 
     private String getSessionId(String msg)
@@ -235,7 +180,7 @@ public class RTSPClient
 
     private int[] getPorts(String type, String msg)
     {
-        Log("LOG", "GETPORTS");
+// DLog.Log("Log", "GETPORTS");
         Pattern pattern = Pattern.compile(type+"=(\\d*)-(\\d*)");
         Matcher matcher = pattern.matcher(msg);
         while (matcher.find())
@@ -243,59 +188,113 @@ public class RTSPClient
         return null;
     }
 
-
     public void sendSetup()
     {
-        String setupMsg = getSetupMsg();
+        String setupMsg;
+        if (controlString == null)
+            setupMsg = getSetupMsg("streamid=0");
+        else
+            setupMsg = getSetupMsg(controlString);
         sendRTSPCommand(setupMsg);
-        String reply = receiveRTSPReply();
-        Log("SETUP", reply);
+        String reply = receiveRTSPReply("SETUP");
+        DLog.Log("SETUP", reply);
         sessionId = getSessionId(reply);
-        clientPorts = getPorts("client_port",reply);
-        Log ("SESSIONID", sessionId);
-        Log("CLIENTPORT", clientPorts[0]+" "+clientPorts[1]);
-        rtpreceiver.setup(clientPorts[0]);
-        isConfigured = true;
+        isConfigured = true; //search for status ok and then set configured
     }
 
-    public void sendPlay()
-    {
-        isStreaming = true;
-        String playMsg = getPlayMsg();
-        sendRTSPCommand(playMsg);
-        String reply = receiveRTSPReply();
-        Log("PLAY", reply);
+    public void sendPlay() throws CustomException {
         if (isConfigured) {
-            rtpreceiver.startReceiving();
+            String playMsg = getPlayMsg();
+            sendRTSPCommand(playMsg);
+            String reply = receiveRTSPReply("PLAY");
+            DLog.Log("PLAY", reply);
         }
+
+        else
+            throw new CustomException("WRONG STATE");
     }
 
-    public void sendPause()
-    {
-        isStreaming = false;
-        String pauseMsg = getPauseMsg();
-        sendRTSPCommand(pauseMsg);
-        String reply = receiveRTSPReply();
-        Log ("PAUSE", reply);
-    }
-
-    public void sendTeardown()
-    {
-        isConfigured = false;
+    public void sendTeardown() throws CustomException {
+        if (!isConfigured)
+            throw new CustomException("WRONG STATE");
+        rtpreceiver.stopReceiving();
         String teardownMsg = getTeardownMsg();
         sendRTSPCommand(teardownMsg);
-        String reply = receiveRTSPReply();
-        Log("TEARDOWN", reply);
+        String reply = receiveRTSPReply("TEARDOWN");
+        DLog.Log("TEARDOWN", reply);
     }
 
-    public void changeStreamParams()
+    public void cleanup() throws IOException {
+        readFromServer.close();
+        outputStream.close();
+        RTSPSocket.close();
+    }
+
+    class RTPReceiver implements Runnable
     {
+        private int port;
+        private DatagramSocket receiver;
+        private volatile boolean isReceiving;
+        private Thread receiverThread;
 
+        RTPReceiver(int port) throws SocketException {
+            receiver = new DatagramSocket(null);
+            receiver.setReuseAddress(true);
+            receiver.bind(new InetSocketAddress(port));
+            this.port = port;
+            isReceiving = false;
+            receiverThread = new Thread(this);
+        }
+
+        void startReceiving()
+        {
+            isReceiving = true;
+            receiverThread.start();
+        }
+
+        void stopReceiving()
+        {
+            isReceiving = false;
+            receiverThread.interrupt();
+        }
+
+        @Override
+        public void run() {
+
+            byte buf[] = new byte[2048];
+            DatagramPacket packet = new DatagramPacket(buf,2048);
+            short i = 1;
+            long count = 0;
+            long startTime = System.currentTimeMillis();
+
+            while (isReceiving && !receiverThread.isInterrupted())
+            {
+                DLog.Log("THREAD", "WAITING TO RECEIVE");
+                try {
+                    receiver.receive(packet);
+                    callback.rtpDGram(packet);
+                    count += packet.getLength();
+                    if (i % 30 == 0)
+                    {
+                        long endTime = System.currentTimeMillis();
+                        double speed = (double)count/(double)(endTime-startTime);
+                        double size = count/1000000.0;
+                        System.out.format("\r%.2fKBps %.3fMB", speed, size);
+                        i = 1;
+                    }
+                    i++;
+                }
+                catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+            receiver.close();
+
+        }
+
+        public boolean isReceiving() {
+            return isReceiving;
+        }
     }
-
-    public void cleanup()
-    {
-
-    }
-
 }
+
