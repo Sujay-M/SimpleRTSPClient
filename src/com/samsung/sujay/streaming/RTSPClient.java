@@ -1,9 +1,6 @@
 package com.samsung.sujay.streaming;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
@@ -26,7 +23,8 @@ public class RTSPClient
     private String serverIp;
     private int serverPort;
     private Socket RTSPSocket;
-    private RTPReceiver rtpreceiver;
+    private Process ffmpegRTPReceiver;
+    private ProcessBuilder ffmpegRTPReceiverBuilder;
     private OutputStream outputStream;
     private BufferedReader readFromServer;
     private int CSeq;
@@ -51,8 +49,6 @@ public class RTSPClient
         clientPorts = new int[]{videoPort, audioPort};
         controlString = null;
         connect();
-        rtpreceiver = new RTPReceiver(videoPort);
-        rtpreceiver.startReceiving();
     }
 
     private void connect() throws IOException {
@@ -139,8 +135,11 @@ public class RTSPClient
 // DLog.Log("CONTENT", new String(content));
                 if (type.equalsIgnoreCase("DESCRIBE"))
                 {
-                    System.out.println(new String(content));
-                    controlString = getControlString(new String (content));
+                    String sdp = new String(content);
+                    System.out.println(sdp);
+                    controlString = getControlString(sdp);
+                    String modSdp = modifySdp(sdp);
+                    System.out.println(modSdp);
                 }
             }
 
@@ -148,6 +147,8 @@ public class RTSPClient
 
             return buf.toString();
         } catch (IOException e) {
+            e.printStackTrace();
+        } catch (CustomException e) {
             e.printStackTrace();
         }
         return null;
@@ -188,6 +189,51 @@ public class RTSPClient
         return null;
     }
 
+    private String modifySdp(String receivedSDP) throws CustomException {
+        Pattern parseSDP1 = Pattern.compile("m=video (\\d+) .*");
+        Pattern parseSDP2 = Pattern.compile("m=audio (\\d+) .*");
+        Matcher vidMatcher = parseSDP1.matcher(receivedSDP);
+        Matcher audMatcher = parseSDP2.matcher(receivedSDP);
+        if (!vidMatcher.find())
+            throw new CustomException("NO VIDEO DESCRIPTION");
+        int v = vidMatcher.start();
+        String videoInfo, info;
+        if (audMatcher.find())
+        {
+            int a = audMatcher.start();
+            if (a>v)
+            {
+                info      = receivedSDP.substring(0, v);
+                videoInfo = receivedSDP.substring(v, a);
+            }
+            else
+            {
+                info      = receivedSDP.substring(0,a);
+                videoInfo = receivedSDP.substring(v);
+            }
+        }
+        else
+        {
+            info      = receivedSDP.substring(0,v);
+            videoInfo = receivedSDP.substring(v);
+        }
+        videoInfo = videoInfo.replaceFirst("\\d+", clientPorts[0]+"");
+        return info+videoInfo;
+    }
+
+    private String processVideoParams(String mediaParams)
+    {
+        String mediaDetails = mediaParams.replaceFirst("\\d+", ""+clientPorts[0])
+                                         .replaceFirst("^a=control.*$", "");
+        return mediaDetails;
+    }
+
+    private ProcessBuilder buildProcess(File sdp)
+    {
+
+        return null;
+    }
+
     public void sendSetup()
     {
         String setupMsg;
@@ -217,7 +263,7 @@ public class RTSPClient
     public void sendTeardown() throws CustomException {
         if (!isConfigured)
             throw new CustomException("WRONG STATE");
-        rtpreceiver.stopReceiving();
+//        rtpreceiver.stopReceiving();                                  destroy subprocess
         String teardownMsg = getTeardownMsg();
         sendRTSPCommand(teardownMsg);
         String reply = receiveRTSPReply("TEARDOWN");
@@ -230,71 +276,6 @@ public class RTSPClient
         RTSPSocket.close();
     }
 
-    class RTPReceiver implements Runnable
-    {
-        private int port;
-        private DatagramSocket receiver;
-        private volatile boolean isReceiving;
-        private Thread receiverThread;
 
-        RTPReceiver(int port) throws SocketException {
-            receiver = new DatagramSocket(null);
-            receiver.setReuseAddress(true);
-            receiver.bind(new InetSocketAddress(port));
-            this.port = port;
-            isReceiving = false;
-            receiverThread = new Thread(this);
-        }
-
-        void startReceiving()
-        {
-            isReceiving = true;
-            receiverThread.start();
-        }
-
-        void stopReceiving()
-        {
-            isReceiving = false;
-            receiverThread.interrupt();
-        }
-
-        @Override
-        public void run() {
-
-            byte buf[] = new byte[2048];
-            DatagramPacket packet = new DatagramPacket(buf,2048);
-            short i = 1;
-            long count = 0;
-            long startTime = System.currentTimeMillis();
-
-            while (isReceiving && !receiverThread.isInterrupted())
-            {
-                DLog.Log("THREAD", "WAITING TO RECEIVE");
-                try {
-                    receiver.receive(packet);
-                    callback.rtpDGram(packet);
-                    count += packet.getLength();
-                    if (i % 30 == 0)
-                    {
-                        long endTime = System.currentTimeMillis();
-                        double speed = (double)count/(double)(endTime-startTime);
-                        double size = count/1000000.0;
-                        System.out.format("\r%.2fKBps %.3fMB", speed, size);
-                        i = 1;
-                    }
-                    i++;
-                }
-                catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-            receiver.close();
-
-        }
-
-        public boolean isReceiving() {
-            return isReceiving;
-        }
-    }
 }
 
